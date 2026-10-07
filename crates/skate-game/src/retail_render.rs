@@ -414,6 +414,11 @@ impl Material for WorldMaterial {
         {
             fragment.shader_defs.push("WORLD_ALPHA_CUTOFF".into());
         }
+        if cfg!(target_os = "macos")
+            && let Some(fragment) = &mut descriptor.fragment
+        {
+            fragment.shader_defs.push("CUBE_ARRAY_GRAD_AS_LEVEL".into());
+        }
         Ok(())
     }
 }

@@ -205,5 +205,15 @@ fn sample_environment(slot: u32, direction: vec3<f32>, bias: f32) -> vec4<f32> {
     let scale = exp2(bias);
     let ddx = dpdx(direction)*scale;
     let ddy = dpdy(direction)*scale;
+#ifdef CUBE_ARRAY_GRAD_AS_LEVEL
+    // naga's Metal backend emits gradient2d for cube-array textureSampleGrad,
+    // which the Metal compiler rejects; select the equivalent level instead.
+    let a = abs(direction);
+    let major = max(max(a.x, a.y), a.z);
+    let footprint = max(length(ddx), length(ddy)) / max(major, 1e-6);
+    let lod = log2(max(footprint * 0.5 * f32(textureDimensions(cubes).x), 1e-6));
+    return textureSampleLevel(cubes,repeat_sampler,direction,page_layer(packed),lod);
+#else
     return textureSampleGrad(cubes,repeat_sampler,direction,page_layer(packed),ddx,ddy);
+#endif
 }

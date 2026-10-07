@@ -76,7 +76,8 @@ pub(crate) fn build(
             })
             .set(RenderPlugin {
                 render_creation: RenderCreation::Automatic(WgpuSettings {
-                    backends: Some(Backends::VULKAN),
+                    // macOS has no native Vulkan driver; use Metal there.
+                    backends: Some(if cfg!(target_os = "macos") { Backends::METAL } else { Backends::VULKAN }),
                     // Existing machine's validation layer rejects wgpu atomic shaders.
                     // This workaround belongs only to the rendering adapter.
                     instance_flags: InstanceFlags::empty(),
