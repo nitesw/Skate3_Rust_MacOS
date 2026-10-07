@@ -2,11 +2,89 @@
   <img src="docs/images/skating-crab.png" alt="Rust crab riding a skateboard" width="480">
 </p>
 
-# Skate 3 Rust Engine
+# Skate 3 Rust Engine (macOS Port)
 
-A Rust and Bevy skating project built from Skate 3 reverse-engineering research.
-Includes skating, tricks, grinds, offboard movement, difficulty settings and
-`.skate` map support. Gameplay parity is still a work in progress.
+A Rust and Bevy skating project built from Skate 3 reverse-engineering research, ported to run natively on **macOS (Apple Silicon & Intel)** via Apple Metal and native gamepad support.
+
+Includes skating, tricks, grinds, offboard movement, difficulty settings and `.skate` map support. Gameplay parity is still a work in progress.
+
+> **Note:** This repository is a macOS port fork of the upstream [SK8-ENGINE/skate-3-rust-engine](https://github.com/SK8-ENGINE/skate-3-rust-engine).
+
+---
+
+## Changes in this macOS Port
+
+1. **Apple Metal Rendering**:
+   - Switched Bevy's rendering backend from Vulkan (`Backends::VULKAN`) to native Apple Metal (`Backends::METAL` via `wgpu`) on macOS.
+   - **Naga Metal Shader Fix**: Naga's Metal backend emits `gradient2d` for cube array `textureSampleGrad`, which the Apple Metal shader compiler rejects. Implemented a workaround (`CUBE_ARRAY_GRAD_AS_LEVEL`) in `retail_material_bindings.wgsl` and `retail_render.rs` using `textureSampleLevel` with calculated level-of-detail (LOD) for cube array environment sampling.
+
+2. **Native Controller Input via `gilrs`**:
+   - macOS does not support Windows XInput. Added `gilrs` (IOKit HID) on macOS to poll connected gamepads (PlayStation DualShock/DualSense, Xbox, Switch Pro, MFi, etc.).
+   - Controller axes and buttons are repacked directly into the TU3 XInput layout, ensuring identical raw values for authentic Flickit analog stick trick physics and gestures.
+
+3. **macOS Build & Launcher Scripts**:
+   - Added `build.sh` for compiling native release binaries with `-C target-cpu=native`.
+   - Added `play.sh` to automatically locate converted game assets in `install/installations/*/assets` and launch the game.
+
+---
+
+## macOS Setup & Instructions
+
+### 1. Prerequisites
+- **macOS** 12 Monterey or newer (Apple Silicon M-series or Intel x86_64)
+- **Rust toolchain** (stable):
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+- **Python 3** with Tkinter:
+  ```bash
+  pip3 install -r tools/requirements-setup.txt
+  ```
+- **Game Controller**: Connect any Xbox, PlayStation DualSense/DualShock, or standard HID gamepad via Bluetooth or USB.
+- **Skate 3 Game Files**: Legally dumped Skate 3 Xbox 360 ISO or extracted game folder containing `default.xex`. (Tools like `extract-xiso` can extract Xbox 360 ISOs on macOS).
+
+### 2. Build
+Build the release binary natively for your Mac architecture:
+```bash
+./build.sh
+```
+Or via cargo:
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release --bin skate3rust
+```
+
+### 3. Asset Setup
+Game assets must be extracted and prepared from your legally dumped copy of Skate 3:
+```bash
+python3 tools/setup.py --base install --game-exe target/release/skate3rust
+```
+In the setup window, point to your `default.xex` or extracted game directory. The pipeline will automatically unpack and convert:
+- Skater models, rigs, and customizable materials
+- Core animations and trick stategraphs
+- University map and disc environments
+- Original HUD font and scoring assets
+
+The converted assets will be saved to `install/installations/<id>/assets`.
+
+### 4. Play
+Run the game using the launcher script:
+```bash
+./play.sh
+```
+Or launch directly with cargo/executable:
+```bash
+cargo run --release --bin skate3rust -- --assets install/installations/<id>/assets
+```
+
+**Controls**:
+- **Right Stick**: Flickit trick controls (ollie, kickflip, laserflip, etc.)
+- **Left Stick**: Steering and board control
+- **Left / Right Triggers**: Left / Right hand grabs & brake
+- **A / X Buttons**: Push (regular / mongo)
+- **Y / Triangle**: Get on / off board
+- **Escape**: In-game menu (difficulty settings, graphics, map selection)
+
+---
 
 ## History
 
@@ -37,54 +115,12 @@ credit for discovering how the game works. This is still a work in progress,
 and using original assets or showing working tricks does not mean every
 system behaves exactly like the original.
 
-## Play
-
-[Download Experimental](https://github.com/SK8-ENGINE/skate-3-rust-engine/releases/tag/experimental).
-Successful `main` builds replace this prerelease. Choose **Latest** in Updates
-for experimental updates; **Stable** is the default.
-
-Extract the Windows release ZIP and run `skate3rust.exe`. Select your Skate 3
-Xbox 360 ISO, or select `default.xex` in an extracted game folder. Keep its
-`data` folder alongside it. Setup prepares the skater, animations and all disc maps, then
-starts University. The original scoring and session-marker HUD assets are also
-exported automatically during setup. No Blender, Python or Rust installation is needed.
-ISO extraction needs internet access. The first conversion can take a while.
-
-Use a compatible gamepad to play. SDL3 supports Xbox/XInput, PlayStation,
-Switch and generic HID controllers; XInput remains available as a Windows
-fallback. Escape opens graphics, difficulty and map settings. Maps can be
-switched without restarting the game.
-
-**Skate 3 assets are not included.** Your converted files stay in
-the `data` folder beside your executable. Each freshly unpacked copy runs its
-own setup; it does not adopt another installation. In-place updates refresh
-only changed asset groups.
-
-## Build
-
-Requires Windows, Rust with the MSVC toolchain, and LLVM installed in its default
-location. Run `BUILD.bat` to build, then `PLAY.bat` to launch the test world.
-`PLAY.bat` opens your saved map (University by default); use the in-game menu to switch maps, or drag a `.skate` file onto `PLAY.bat`. An SDL3-compatible gamepad is required for gameplay;
-Escape opens difficulty and graphics settings.
-
-Development builds use a prepared asset set in `assets/private/` or the
-installed asset directory. `scripts/Build-Release.ps1` builds the portable Windows
-package and requires Python 3.13. GitHub Actions builds `main` automatically;
-numbered releases are published separately.
-
-Custom animations and climbing support remain available, but no custom clips
-are shipped. The included format-demo map is original procedural content.
-
-Implementation notes are in [`docs/`](docs/). Patched Bevy dependencies and
-their licenses are in [`vendor/`](vendor/). This is an unofficial project,
-not affiliated with EA.
-
 ## Advanced diagnostics
 
-Windows builds support opt-in [performance timeline capture](docs/performance-tracing.md)
+Both macOS and Windows builds support opt-in [performance timeline capture](docs/performance-tracing.md)
 through the `--trace` CLI option, including optional GPU pass diagnostics.
 
-## License
+## License & Credits
 
 Copyright (c) 2026 dumbad and the Skate 3 Rust Engine contributors.
 Unless otherwise noted, this project's original code is licensed under the
@@ -97,3 +133,7 @@ Third-party code retains its existing licenses and copyright notices, including
 the vendored Bevy crates and tooling under `tools/vendor/`. This license does
 not grant rights to Electronic Arts' game code, data, assets, or trademarks,
 or to content supplied by other map and mod authors.
+
+Implementation notes are in [`docs/`](docs/). Patched Bevy dependencies and
+their licenses are in [`vendor/`](vendor/). This is an unofficial project,
+not affiliated with Electronic Arts (EA).

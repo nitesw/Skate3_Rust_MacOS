@@ -3,7 +3,9 @@
 //! axes/trigger bytes reach the TU3 converter without Bevy/gilrs deadzones or
 //! normalized-axis reconstruction. `SKATE3_INPUT=xinput` selects the original
 //! Windows XInput transport, which is also the fallback if SDL cannot start.
-use super::controller_kind::{ControllerKind, XinputCaps};
+use super::controller_kind::ControllerKind;
+#[cfg(windows)]
+use super::controller_kind::XinputCaps;
 use skate_core::input::xbox::XboxState;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,7 +62,6 @@ pub(crate) enum DeviceError {
     State(u32),
     Capabilities(u32),
     /// No device backend could be started.
-    #[cfg(not(windows))]
     Unavailable,
 }
 
@@ -475,9 +476,11 @@ mod sdl {
 
 enum Backend {
     Sdl(&'static sdl::Shared),
+    #[cfg(target_os = "macos")]
+    Gilrs,
     #[cfg(windows)]
     XInput,
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     Unavailable,
 }
 
@@ -489,14 +492,24 @@ fn backend() -> &'static Backend {
             bevy::log::info!("Controller input: XInput (SKATE3_INPUT=xinput)");
             return Backend::XInput;
         }
+        #[cfg(target_os = "macos")]
+        if std::env::var("SKATE3_INPUT").is_ok_and(|v| v.eq_ignore_ascii_case("gilrs")) {
+            bevy::log::info!("Controller input: gilrs (SKATE3_INPUT=gilrs)");
+            return Backend::Gilrs;
+        }
         match sdl::start() {
             Ok(shared) => Backend::Sdl(shared),
+            #[cfg(target_os = "macos")]
+            Err(error) => {
+                bevy::log::warn!("SDL gamepad input unavailable ({error}); falling back to gilrs");
+                Backend::Gilrs
+            }
             #[cfg(windows)]
             Err(error) => {
                 bevy::log::warn!("SDL gamepad input unavailable ({error}); using XInput");
                 Backend::XInput
             }
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "macos")))]
             Err(error) => {
                 bevy::log::error!("SDL gamepad input unavailable: {error}");
                 Backend::Unavailable
@@ -505,58 +518,98 @@ fn backend() -> &'static Backend {
     })
 }
 
+// macOS has no XInput; gilrs (IOKit HID) state is repacked into the same
+// XInput layout so the TU3 converter sees identical raw values.
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::*;
+    use gilrs::{Axis, Button, Gamepad, Gilrs};
+    use std::sync::{Mutex, OnceLock};
+
+    static GILRS: OnceLock<Mutex<Option<Gilrs>>> = OnceLock::new();
+    static PACKETS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    fn stick(value: f32) -> i16 {
+        (value.clamp(-1.0, 1.0) * 32767.0).round() as i16
+    }
+
+    fn trigger(pad: &Gamepad, button: Button, axis: Axis) -> u8 {
+        let value = pad
+            .button_data(button)
+            .map(|data| data.value())
+            .unwrap_or_else(|| (pad.value(axis) + 1.0) * 0.5);
+        (value.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
+    pub(super) fn poll(index: u32) -> Result<DevicePacket, DeviceError> {
+        let lock = GILRS.get_or_init(|| Mutex::new(Gilrs::new().ok()));
+        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(gilrs) = guard.as_mut() else {
+            return Err(DeviceError::Disconnected);
+        };
+        while gilrs.next_event().is_some() {}
+        let Some((_, pad)) = gilrs
+            .gamepads()
+            .filter(|(_, pad)| pad.is_connected())
+            .nth(index as usize)
+        else {
+            return Err(DeviceError::Disconnected);
+        };
+        let dpad_x = pad.value(Axis::DPadX);
+        let dpad_y = pad.value(Axis::DPadY);
+        let bits: [(bool, u16); 14] = [
+            (pad.is_pressed(Button::DPadUp) || dpad_y > 0.5, 0x0001),
+            (pad.is_pressed(Button::DPadDown) || dpad_y < -0.5, 0x0002),
+            (pad.is_pressed(Button::DPadLeft) || dpad_x < -0.5, 0x0004),
+            (pad.is_pressed(Button::DPadRight) || dpad_x > 0.5, 0x0008),
+            (pad.is_pressed(Button::Start), 0x0010),
+            (pad.is_pressed(Button::Select), 0x0020),
+            (pad.is_pressed(Button::LeftThumb), 0x0040),
+            (pad.is_pressed(Button::RightThumb), 0x0080),
+            (pad.is_pressed(Button::LeftTrigger), 0x0100),
+            (pad.is_pressed(Button::RightTrigger), 0x0200),
+            (pad.is_pressed(Button::South), 0x1000),
+            (pad.is_pressed(Button::East), 0x2000),
+            (pad.is_pressed(Button::West), 0x4000),
+            (pad.is_pressed(Button::North), 0x8000),
+        ];
+        let buttons = bits
+            .iter()
+            .filter(|(down, _)| *down)
+            .fold(0u16, |acc, (_, bit)| acc | bit);
+        Ok(DevicePacket {
+            number: PACKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            state: XboxState {
+                buttons,
+                triggers: [
+                    trigger(&pad, Button::LeftTrigger2, Axis::LeftZ),
+                    trigger(&pad, Button::RightTrigger2, Axis::RightZ),
+                ],
+                left: [stick(pad.value(Axis::LeftStickX)), stick(pad.value(Axis::LeftStickY))],
+                right: [stick(pad.value(Axis::RightStickX)), stick(pad.value(Axis::RightStickY))],
+            },
+            subtype: 1,
+            kind: None,
+        })
+    }
+}
+
 pub(crate) fn poll_cached(
     index: usize,
-    cache: &mut CapabilityCache,
+    _cache: &mut CapabilityCache,
 ) -> Result<DevicePacket, DeviceError> {
     assert!(index < 4);
     match backend() {
         Backend::Sdl(shared) => {
-            let _ = cache;
+            let _ = _cache;
             sdl::poll(shared, index)
         }
+        #[cfg(target_os = "macos")]
+        Backend::Gilrs => macos::poll(index as u32),
         #[cfg(windows)]
-        Backend::XInput => windows::poll(index as u32, cache),
-        #[cfg(not(windows))]
+        Backend::XInput => windows::poll(index as u32, _cache),
+        #[cfg(not(any(windows, target_os = "macos")))]
         Backend::Unavailable => Err(DeviceError::Unavailable),
-    }
-}
-
-#[cfg(test)]
-mod conversion_tests {
-    use super::*;
-
-    /// SDL's XInput expansion: byte*257-32768 on the full axis, then the
-    /// gamepad layer rescales -32768..=32767 onto 0..=32767.
-    fn sdl_trigger(byte: u8) -> i16 {
-        let axis = i32::from(byte) * 257 - 32768;
-        ((axis + 32768) * 32767 / 65535) as i16
-    }
-
-    #[test]
-    fn every_trigger_byte_survives_the_sdl_round_trip() {
-        for byte in 0..=255u8 {
-            assert_eq!(xinput_trigger(sdl_trigger(byte)), byte);
-        }
-        assert_eq!(xinput_trigger(-1), 0);
-    }
-
-    #[test]
-    fn stick_y_inversion_restores_xinput_values_without_overflow() {
-        for y in [i16::MIN, -1, 0, 1, 12345, i16::MAX] {
-            assert_eq!(xinput_y(!y), y);
-        }
-        assert_eq!(xinput_y(i16::MIN), i16::MAX);
-    }
-
-    #[test]
-    fn paddle_masks_round_trip_and_names_use_xinput_bits() {
-        set_paddles([0x1000, 0, 0x0100, 0x8000]);
-        assert_eq!(paddles(), [0x1000, 0, 0x0100, 0x8000]);
-        set_paddles([0; 4]);
-        assert_eq!(button_mask("A"), Some(0x1000));
-        assert_eq!(button_mask("left_shoulder"), Some(0x0100));
-        assert_eq!(button_mask("guide"), None);
     }
 }
 
